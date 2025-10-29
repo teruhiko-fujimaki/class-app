@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>クラス編成システム</title>
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+        .container { display: flex; gap: 2rem; padding: 2rem; height: calc(100vh - 220px); }
+        .class-section, .student-section { flex: 1; padding: 1rem; background: #f8f9fa; border-radius: 8px; overflow-y: auto; }
+        .class-section { flex: 2; }
+        .class-list { display: grid; gap: 1rem; }
+        .class-card { background: white; border: 2px solid #333; border-radius: 8px; padding: 1rem; min-height: 150px; }
+        .class-card.drag-over { border: 2px dashed #333; background: #f0f0f0; }
+        .class-card h3 { margin: 0 0 1rem 0; padding-bottom: 0.5rem; border-bottom: 1px solid #ddd; display: flex; align-items: center; gap: .5rem; cursor: move; }
+        .class-card h3::before { content: "☰"; font-size: 1.2rem; color: #666; }
+        .student-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: .5rem; }
+        .student-card { background: white; border: 1px solid #ddd; border-radius: 4px; padding: .5rem; position: relative; font-size: .85rem; cursor: grab; }
+        .student-card.dragging { opacity: .6; }
+        .remove-btn { position: absolute; top: .1rem; right: .1rem; width: 16px; height: 16px; line-height: 16px; text-align: center; background: #ff4444; color: #fff; border: none; border-radius: 2px; cursor: pointer; font-size: 10px; opacity: 0; }
+        .student-card:hover .remove-btn { opacity: 1; }
+        .student-info { margin: 0; font-size: .75rem; display: flex; flex-direction: column; gap: .1rem; }
+        .student-gender { font-size: .7rem; color: #666; }
+        .student-count { font-size: .85rem; color: #666; margin-top: .5rem; line-height: 1.5; }
+        .add-class-form { margin-bottom: 1rem; display:flex; gap:.5rem; }
+        .add-class-form input { padding: .5rem; border: 1px solid #ddd; border-radius: 4px; }
+        .add-class-form button { background: #333; color: #fff; padding: .5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
+        .student-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .header-buttons { display: flex; gap: 1rem; align-items: center; }
+        .reset-btn { background: #dc3545; color: #fff; padding: .5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
+        .hidden { display: none; }
+    </style>
+    </head>
+<body>
+    <header>
+        <h2>クラス編成</h2>
+    </header>
+
+    <div style="padding: 0 2rem; color:#555;">
+        1. 右側でCSVをアップロードして生徒一覧を作成<br/>
+        2. 左側で学級を追加<br/>
+        3. 生徒カードをドラッグ＆ドロップで学級へ配置／学級から外す
+    </div>
+
+    <main class="container">
+        <section class="class-section">
+            <div class="add-class-form">
+                <input id="new-class-name" type="text" placeholder="学級名（例: 1年A組）" />
+                <button id="add-class-btn">学級を追加</button>
+            </div>
+            <div id="class-list" class="class-list"></div>
+        </section>
+
+        <section class="student-section">
+            <div class="student-header">
+                <h3>未割当 生徒一覧</h3>
+                <div class="header-buttons">
+                    <form id="upload-form" class="upload-form">
+                        <input id="csv-file" name="file" type="file" accept=".csv" class="hidden" />
+                        <label for="csv-file">CSVを選択</label>
+                        <button type="submit">アップロード</button>
+                    </form>
+                    <button id="reset-btn" class="reset-btn" title="全データ初期化">リセット</button>
+                </div>
+            </div>
+            <div id="unassigned-list" class="student-list"></div>
+        </section>
+    </main>
+
+    <script>
+    const api = {
+        getStudents: () => fetch('/students').then(r => r.json()),
+        getClasses: () => fetch('/classes').then(r => r.json()),
+        addClass: (name) => fetch('/classes', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})}).then(r => r.json()),
+        moveStudent: (student_id, class_id) => fetch('/move-student', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({student_id, class_id})}).then(r => r.json()),
+        removeStudent: (student_id, class_id) => fetch('/remove-student', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({student_id, class_id})}).then(r => r.json()),
+        upload: (file) => { const fd = new FormData(); fd.append('file', file); return fetch('/upload', { method:'POST', body: fd }).then(r => r.json()); },
+        reset: () => fetch('/reset', { method:'POST' }).then(r => r.json()),
+        updateClassOrder: (order) => fetch('/update-class-order', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({order})}).then(r => r.json()),
+    };
+
+    let state = { students: [], classes: [] };
+
+    function byId(id){ return document.getElementById(id); }
+
+    function render() {
+        renderClasses(state.classes);
+        renderUnassigned(state.students, state.classes);
+    }
+
+    function renderClasses(classes) {
+        const container = byId('class-list');
+        container.innerHTML = '';
+        classes.forEach(cls => {
+            const card = document.createElement('div');
+            card.className = 'class-card';
+            card.draggable = true;
+            card.dataset.classId = cls.id;
+
+            // Drag reorder classes or drop students
+            card.addEventListener('dragstart', (e)=>{ e.dataTransfer.setData('text/class-id', cls.id); card.classList.add('dragging'); });
+            card.addEventListener('dragend', ()=> card.classList.remove('dragging'));
+            card.addEventListener('dragover', (e)=>{ e.preventDefault(); card.classList.add('drag-over'); });
+            card.addEventListener('dragleave', ()=> card.classList.remove('drag-over'));
+            card.addEventListener('drop', async (e)=>{
+                e.preventDefault(); card.classList.remove('drag-over');
+                const draggedId = e.dataTransfer.getData('text/class-id');
+                if (draggedId) {
+                    const children = Array.from(container.children);
+                    const draggedEl = children.find(el => el.dataset.classId === draggedId);
+                    if (draggedEl && draggedEl !== card) {
+                        container.insertBefore(draggedEl, card);
+                        const order = Array.from(container.children).map(el => parseInt(el.dataset.classId, 10));
+                        try { await api.updateClassOrder(order); } catch (e) { console.error(e); }
+                    }
+                    return;
+                }
+                const sid = e.dataTransfer.getData('text/student-id');
+                if (sid) {
+                    try { await api.moveStudent(parseInt(sid,10), cls.id); await refresh(); } catch (err) { alert('移動に失敗しました'); console.error(err); }
+                }
+            });
+
+            const title = document.createElement('h3');
+            title.textContent = cls.name;
+            card.appendChild(title);
+
+            const list = document.createElement('div');
+            list.className = 'student-list';
+            (cls.students || []).forEach(stu => list.appendChild(createStudentCard(stu, cls.id)));
+            card.appendChild(list);
+
+            list.addEventListener('dragover', (e)=>{ e.preventDefault(); card.classList.add('drag-over'); });
+            list.addEventListener('dragleave', ()=> card.classList.remove('drag-over'));
+            list.addEventListener('drop', async (e)=>{
+                e.preventDefault(); card.classList.remove('drag-over');
+                const sid = e.dataTransfer.getData('text/student-id');
+                if (sid) {
+                    try { await api.moveStudent(parseInt(sid,10), cls.id); await refresh(); } catch (err) { alert('移動に失敗しました'); console.error(err); }
+                }
+            });
+
+            const counts = document.createElement('div');
+            counts.className = 'student-count';
+            const boys = (cls.students||[]).filter(s => s.gender === '男').length;
+            const girls = (cls.students||[]).filter(s => s.gender === '女').length;
+            counts.innerHTML = `人数: ${(cls.students||[]).length}<br>男: ${boys} / 女: ${girls}`;
+            card.appendChild(counts);
+
+            container.appendChild(card);
+        });
+    }
+
+    function renderUnassigned(students, classes) {
+        const assignedIds = new Set();
+        classes.forEach(c => (c.students||[]).forEach(s => assignedIds.add(s.id)));
+        const unassigned = students.filter(s => !assignedIds.has(s.id));
+        const container = byId('unassigned-list');
+        container.innerHTML = '';
+        unassigned.forEach(stu => container.appendChild(createStudentCard(stu, null)));
+    }
+
+    function createStudentCard(stu, classId) {
+        const card = document.createElement('div');
+        card.className = 'student-card';
+        card.draggable = true;
+        card.addEventListener('dragstart', (e)=>{ e.dataTransfer.setData('text/student-id', stu.id); card.classList.add('dragging'); });
+        card.addEventListener('dragend', ()=> card.classList.remove('dragging'));
+
+        if (classId != null) {
+            const btn = document.createElement('button');
+            btn.className = 'remove-btn';
+            btn.textContent = '×';
+            btn.title = '学級から外す';
+            btn.addEventListener('click', async (e)=>{
+                e.stopPropagation();
+                try { await api.removeStudent(stu.id, classId); await refresh(); } catch (err) { alert('削除に失敗しました'); }
+            });
+            card.appendChild(btn);
+        }
+
+        const info = document.createElement('p');
+        info.className = 'student-info';
+        info.innerHTML = `<strong>${stu.name}</strong><span class="student-gender">${stu.gender} / ${stu.student_id}</span>`;
+        card.appendChild(info);
+
+        return card;
+    }
+
+    async function refresh(){
+        const [students, classes] = await Promise.all([api.getStudents(), api.getClasses()]);
+        state.students = students;
+        state.classes = classes;
+        render();
+    }
+
+    function bindEvents(){
+        byId('add-class-btn').addEventListener('click', async ()=>{
+            const name = byId('new-class-name').value.trim();
+            if (!name) return;
+            await api.addClass(name);
+            byId('new-class-name').value = '';
+            await refresh();
+        });
+
+        byId('upload-form').addEventListener('submit', async (e)=>{
+            e.preventDefault();
+            const file = byId('csv-file').files[0];
+            if (!file) { alert('CSVファイルを選択してください'); return; }
+            const res = await api.upload(file);
+            if (res.error) { alert(res.error); return; }
+            await refresh();
+        });
+
+        byId('reset-btn').addEventListener('click', async ()=>{
+            if (!confirm('本当に全データを初期化しますか？')) return;
+            await api.reset();
+            await refresh();
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', async ()=>{
+        bindEvents();
+        await refresh();
+    });
+    </script>
+</body>
+</html>
+
